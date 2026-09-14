@@ -1,0 +1,23 @@
+{
+  "name": "tgrep-manager",
+  "version": "1.0.0",
+  "description": "Cross-platform Web Dashboard and CLI daemon controller for Microsoft tgrep (Trigram Index) code search in multi-repo environments",
+  "main": "src/server.ts",
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "dev": "bun --watch src/server.ts"
+  },
+  "keywords": [
+    "tgrep",
+    "trigram",
+    "code-search",
+    "ai-agent",
+    "claude-code",
+    "codex",
+    "antigravity",
+    "bulma",
+    "bun"
+  ],
+  "author": "Open Source Community",
+  "license": "MIT"
+}

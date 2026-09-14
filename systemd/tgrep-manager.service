@@ -1,0 +1,14 @@
+[Unit]
+Description=Codebase Index Web Manager (tgrep controller)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/source-code/tgrep-manager
+Environment="PATH=%h/.bun/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=%h/.bun/bin/bun src/server.ts
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

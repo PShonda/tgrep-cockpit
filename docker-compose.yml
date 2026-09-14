@@ -1,0 +1,13 @@
+services:
+  tgrep-manager:
+    build: .
+    container_name: tgrep-manager
+    restart: unless-stopped
+    ports:
+      - "3150:3150"
+    volumes:
+      # Mount your workspace directory containing repositories
+      - ${WORKSPACE_DIR:-./sample-projects}:/source-code
+    environment:
+      - PORT=3150
+      - SOURCE_DIR=/source-code

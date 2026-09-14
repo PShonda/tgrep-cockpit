@@ -1,0 +1,5 @@
+node_modules/
+.env
+.tgrep/
+*.log
+.DS_Store
