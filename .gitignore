@@ -3,4 +3,5 @@ node_modules/
 .tgrep/
 *.log
 config.json
+homepage-integration/
 .DS_Store

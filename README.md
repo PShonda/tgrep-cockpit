@@ -22,7 +22,7 @@ When integrating with AI coding assistants (**Claude Code**, **Codex**, **Antigr
 **`tgrep-manager`** solves all of this:
 - 🖥️ **Bulma 1.0 Dark Mode Web UI**: An elegant, high-density dashboard on port `3150` to view, start, stop, and re-index repositories on demand.
 - ⚡ **Cross-Platform CLI**: Native scripts for **Linux/macOS** (`.sh`) and **Windows** (`.ps1`).
-- 📊 **GetHomepage Native Tile**: Built-in `/api/widget` endpoint providing live counters (Active Daemons, Indexed Repos, Total Repos) and ping health monitors.
+- 📊 **Real-Time Telemetry & Widget API**: Built-in `/api/widget` endpoint providing live counters (Active Daemons, Indexed Repos, Total Repos) and health monitors.
 - 🤖 **Agent-Ready Global Policies**: Clean drop-in templates for Claude Code, Codex, and Antigravity that don't pollute team git repositories.
 
 ---
@@ -32,7 +32,7 @@ When integrating with AI coding assistants (**Claude Code**, **Codex**, **Antigr
 ```mermaid
 flowchart TD
     subgraph Dashboard["Web & Dashboard Layer"]
-        HP["GetHomepage Dashboard (:3000)"] -->|Custom API Widget| WEB["tgrep-manager Web UI (:3150)"]
+        WEB["tgrep-manager Web UI (:3150)"]
     end
 
     subgraph Agents["AI Coding Agents"]
@@ -197,37 +197,6 @@ WORKSPACE_DIR=/path/to/source-code docker compose up -d
 .\bin\tgrep-manage.ps1 index my-project
 .\bin\tgrep-manage.ps1 status my-project
 ```
-
----
-
-## 🌐 GetHomepage Integration
-
-Add a glowing, live-updating card with telemetry counters to your [GetHomepage](https://gethomepage.dev/) dashboard:
-
-### 1. Add to `services.yaml`
-```yaml
-    - Code Indexer:
-        id: tgrep-manager
-        icon: mdi-lightning-bolt
-        href: http://<SERVER_IP>:3150
-        description: Trigram Index & Search Manager
-        target: _blank
-        siteMonitor: http://<SERVER_IP>:3150
-        widget:
-          type: customapi
-          url: http://<SERVER_IP>:3150/api/widget
-          refreshInterval: 5000
-          mappings:
-            - field: running
-              label: Active
-            - field: indexed
-              label: Indexed
-            - field: total
-              label: Repos
-```
-
-### 2. Optional D.Va / Cyberpunk Card CSS (`custom.css`)
-See [homepage-integration/custom.css](homepage-integration/custom.css) for smooth gradient borders and hover animations.
 
 ---
 
