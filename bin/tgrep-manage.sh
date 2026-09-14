@@ -1,14 +1,28 @@
 #!/usr/bin/env bash
 set -e
 
-SOURCE_DIR="${SOURCE_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CONFIG_FILE="$SCRIPT_DIR/../config.json"
+
+# Load workspaces from SOURCE_DIRS env, or config.json, or SOURCE_DIR, or parent of project
+if [[ -z "$SOURCE_DIRS" && -z "$SOURCE_DIR" && -f "$CONFIG_FILE" ]]; then
+  SOURCE_DIRS=$(jq -r '.workspaces // [] | join(",")' "$CONFIG_FILE" 2>/dev/null || echo "")
+fi
+
+RAW_DIRS="${SOURCE_DIRS:-${SOURCE_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}}"
+IFS=',:' read -ra WORKSPACES <<< "$RAW_DIRS"
 
 resolve_path() {
   local p="${1:-.}"
   if [[ "$p" != /* ]]; then
-    if [[ -d "$SOURCE_DIR/$p" ]]; then
-      p="$SOURCE_DIR/$p"
-    else
+    for ws in "${WORKSPACES[@]}"; do
+      ws="$(echo "$ws" | xargs)"
+      if [[ -n "$ws" && -d "$ws/$p" ]]; then
+        p="$ws/$p"
+        break
+      fi
+    done
+    if [[ "$p" != /* ]]; then
       p="$(pwd)/$p"
     fi
   fi
@@ -36,26 +50,35 @@ cmd_list() {
   printf "%-25s | %-12s | %-18s | %-10s\n" "PROJECT" "INDEXED" "SERVER STATUS" "PORT/PID"
   echo "=========================================================================================="
 
-  for d in "$SOURCE_DIR"/*; do
-    if [[ -d "$d" ]]; then
-      local name
-      name="$(basename "$d")"
-      local indexed="No"
-      local sstatus="Stopped"
-      local detail="-"
+  for ws in "${WORKSPACES[@]}"; do
+    ws="$(echo "$ws" | xargs)"
+    [[ -n "$ws" && -d "$ws" ]] || continue
 
-      if [[ -d "$d/.tgrep" ]]; then
-        indexed="Yes"
-        local pid
-        if pid=$(is_running "$d"); then
-          local port
-          port=$(jq -r '.port // empty' "$d/.tgrep/serve.json" 2>/dev/null || grep -o '"port":[0-9]*' "$d/.tgrep/serve.json" | cut -d: -f2)
-          sstatus="Running"
-          detail=":${port} (PID:${pid})"
-        fi
-      fi
-      printf "%-25s | %-12s | %-18s | %-10s\n" "$name" "$indexed" "$sstatus" "$detail"
+    if [[ ${#WORKSPACES[@]} -gt 1 ]]; then
+      echo "--- Workspace: $ws ---"
     fi
+
+    for d in "$ws"/*; do
+      if [[ -d "$d" && ! "$(basename "$d")" =~ ^\. ]]; then
+        local name
+        name="$(basename "$d")"
+        local indexed="No"
+        local sstatus="Stopped"
+        local detail="-"
+
+        if [[ -d "$d/.tgrep" ]]; then
+          indexed="Yes"
+          local pid
+          if pid=$(is_running "$d"); then
+            local port
+            port=$(jq -r '.port // empty' "$d/.tgrep/serve.json" 2>/dev/null || grep -o '"port":[0-9]*' "$d/.tgrep/serve.json" | cut -d: -f2)
+            sstatus="Running"
+            detail=":${port} (PID:${pid})"
+          fi
+        fi
+        printf "%-25s | %-12s | %-18s | %-10s\n" "$name" "$indexed" "$sstatus" "$detail"
+      fi
+    done
   done
   echo "=========================================================================================="
 }

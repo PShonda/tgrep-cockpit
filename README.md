@@ -125,6 +125,17 @@ git config --global core.excludesfile "$env:USERPROFILE\.config\git\ignore"
 
 ---
 
+## 🎛️ Web Dashboard Features
+
+* 🗂️ **Dual View Modes**: Switch between **Card View** (rich visual cards with live status badges) and **Table View** (dense, high-speed developer rows). Persisted across browser sessions.
+* 📁 **Multipath Workspaces**: Add and manage multiple repository root directories directly via the **⚙️ Workspaces** modal or `config.json` / `SOURCE_DIRS` env var.
+* 🔍 **Instant Search & Filter**: Real-time debounce filtering matching repository names, workspace paths, and active status keywords (`serving`, `indexed`, `idle`).
+* 🗃️ **Flexible Grouping**: Group repositories **By Workspace** (with directory headers & counters), **By Status** (Serving / Idle / Not Indexed), or view as a flat list.
+* 📶 **Multi-Criteria Sorting**: Sort by Name (A→Z, Z→A), Server Status (Active first), Total Files, or Trigram counts.
+* 📄 **Clean Pagination**: Selectable page sizes (10, 25, 50, All) with responsive pagination controls.
+
+---
+
 ## 🚀 Running `tgrep-manager`
 
 ### Option A: Run Natively with Bun (All Platforms)
@@ -135,7 +146,10 @@ git clone https://github.com/<YOUR_USERNAME>/tgrep-manager.git
 cd tgrep-manager
 
 # Start the dashboard (scans parent directory by default)
-SOURCE_DIR=/path/to/your/projects bun run src/server.ts
+bun run src/server.ts
+
+# Or specify multiple workspaces via SOURCE_DIRS:
+SOURCE_DIRS="/path/to/work,/path/to/personal" bun run src/server.ts
 ```
 Open **`http://localhost:3150`** in your browser.
 
@@ -168,7 +182,7 @@ WORKSPACE_DIR=/path/to/source-code docker compose up -d
 
 ### Linux & macOS (`bin/tgrep-manage.sh`):
 ```bash
-./bin/tgrep-manage.sh list             # Table of all repos with status & ports
+./bin/tgrep-manage.sh list             # Table of all repos across all workspaces
 ./bin/tgrep-manage.sh start my-project # Start detached inotify daemon
 ./bin/tgrep-manage.sh stop my-project  # Stop running daemon
 ./bin/tgrep-manage.sh index my-project # Rebuild trigram index
@@ -228,8 +242,10 @@ See [homepage-integration/custom.css](homepage-integration/custom.css) for smoot
 
 | Method | Endpoint | Description | Sample Output |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/api/projects` | List all discovered projects & status | `[{"name":"my-app","indexed":true,"running":true,"port":38499}]` |
-| `GET` | `/api/widget` | Real-time metrics for dashboard widgets | `{"running":1,"indexed":3,"total":5}` |
+| `GET` | `/api/projects` | List all discovered projects & workspaces | `{"projects":[...],"workspaces":["/path/to/work"]}` |
+| `GET` | `/api/widget` | Real-time metrics for dashboard widgets | `{"running":1,"indexed":3,"total":5,"workspaces":2}` |
+| `GET` | `/api/config` | Retrieve current workspace directory list | `{"workspaces":["/path/to/work","/path/to/oss"]}` |
+| `POST` | `/api/config` | Update workspace directory paths | `{"success":true,"workspaces":[...]}` |
 | `POST` | `/api/action` | Trigger lifecycle action (`start`,`stop`,`index`) | `{"success":true,"output":"✓ Started."}` |
 
 ---

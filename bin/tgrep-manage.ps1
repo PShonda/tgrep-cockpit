@@ -23,15 +23,36 @@ param (
     [string]$Target = "."
 )
 
-$SourceDir = if ($env:SOURCE_DIR) { $env:SOURCE_DIR } else { (Resolve-Path "$PSScriptRoot\..\..").Path }
+$ConfigFile = Join-Path $PSScriptRoot "..\config.json"
+$rawDirs = if ($env:SOURCE_DIRS) {
+    $env:SOURCE_DIRS
+} elseif ($env:SOURCE_DIR) {
+    $env:SOURCE_DIR
+} elseif (Test-Path $ConfigFile) {
+    try {
+        $cfg = Get-Content $ConfigFile -Raw | ConvertFrom-Json
+        $cfg.workspaces -join ","
+    } catch {
+        (Resolve-Path "$PSScriptRoot\..\..").Path
+    }
+} else {
+    (Resolve-Path "$PSScriptRoot\..\..").Path
+}
+
+$Workspaces = @($rawDirs -split "[,;]" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" -and (Test-Path $_) })
+if ($Workspaces.Count -eq 0) {
+    $Workspaces = @((Resolve-Path "$PSScriptRoot\..\..").Path)
+}
 
 function Resolve-ProjectPath([string]$path) {
     if ([System.IO.Path]::IsPathRooted($path)) {
         return $path
     }
-    $combined = Join-Path $SourceDir $path
-    if (Test-Path $combined) {
-        return (Resolve-Path $combined).Path
+    foreach ($ws in $Workspaces) {
+        $combined = Join-Path $ws $path
+        if (Test-Path $combined) {
+            return (Resolve-Path $combined).Path
+        }
     }
     return (Resolve-Path (Join-Path (Get-Location) $path)).Path
 }
@@ -63,25 +84,30 @@ function Show-ProjectList {
     "{0,-25} | {1,-12} | {2,-18} | {3,-10}" -f "PROJECT", "INDEXED", "SERVER STATUS", "PORT/PID"
     Write-Host "==========================================================================================" -ForegroundColor Cyan
 
-    $directories = Get-ChildItem -Path $SourceDir -Directory
-    foreach ($dir in $directories) {
-        $name = $dir.Name
-        if ($name.StartsWith(".")) { continue }
-        
-        $tgrepDir = Join-Path $dir.FullName ".tgrep"
-        $indexed = if (Test-Path $tgrepDir) { "Yes" } else { "No" }
-        $sstatus = "Stopped"
-        $detail = "-"
-
-        if ($indexed -eq "Yes") {
-            $serverInfo = Get-RunningServer $dir.FullName
-            if ($serverInfo) {
-                $sstatus = "Running"
-                $detail = ":{0} (PID:{1})" -f $serverInfo.port, $serverInfo.pid
-            }
+    foreach ($ws in $Workspaces) {
+        if ($Workspaces.Count -gt 1) {
+            Write-Host "--- Workspace: $ws ---" -ForegroundColor DarkGray
         }
+        $directories = Get-ChildItem -Path $ws -Directory -ErrorAction SilentlyContinue
+        foreach ($dir in $directories) {
+            $name = $dir.Name
+            if ($name.StartsWith(".")) { continue }
+            
+            $tgrepDir = Join-Path $dir.FullName ".tgrep"
+            $indexed = if (Test-Path $tgrepDir) { "Yes" } else { "No" }
+            $sstatus = "Stopped"
+            $detail = "-"
 
-        "{0,-25} | {1,-12} | {2,-18} | {3,-10}" -f $name, $indexed, $sstatus, $detail
+            if ($indexed -eq "Yes") {
+                $serverInfo = Get-RunningServer $dir.FullName
+                if ($serverInfo) {
+                    $sstatus = "Running"
+                    $detail = ":{0} (PID:{1})" -f $serverInfo.port, $serverInfo.pid
+                }
+            }
+
+            "{0,-25} | {1,-12} | {2,-18} | {3,-10}" -f $name, $indexed, $sstatus, $detail
+        }
     }
     Write-Host "==========================================================================================" -ForegroundColor Cyan
 }

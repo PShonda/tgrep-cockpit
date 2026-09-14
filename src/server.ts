@@ -1,16 +1,18 @@
-import { readdir, stat, readFile } from "node:fs/promises";
+import { readdir, stat, readFile, writeFile } from "node:fs/promises";
 import { join, basename, resolve } from "node:path";
 
-const SOURCE_DIR = process.env.SOURCE_DIR || resolve(import.meta.dir, "../..");
 const PORT = parseInt(process.env.PORT || "3150", 10);
 const isWindows = process.platform === "win32";
 const MANAGE_SCRIPT = isWindows
   ? resolve(import.meta.dir, "../bin/tgrep-manage.ps1")
   : resolve(import.meta.dir, "../bin/tgrep-manage.sh");
+const CONFIG_PATH = resolve(import.meta.dir, "../config.json");
 
 interface ProjectStatus {
   name: string;
   path: string;
+  workspace: string;
+  workspaceName: string;
   indexed: boolean;
   running: boolean;
   pid?: number;
@@ -20,8 +22,36 @@ interface ProjectStatus {
   updated?: string;
 }
 
-async function getProjectStatus(projectDir: string): Promise<ProjectStatus> {
+async function getWorkspaces(): Promise<string[]> {
+  try {
+    const content = await readFile(CONFIG_PATH, "utf-8");
+    const parsed = JSON.parse(content);
+    if (Array.isArray(parsed.workspaces) && parsed.workspaces.length > 0) {
+      const valid = parsed.workspaces.filter((w: any) => typeof w === "string" && w.trim().length > 0);
+      if (valid.length > 0) return valid;
+    }
+  } catch {
+    // config.json not present or invalid
+  }
+
+  const raw = process.env.SOURCE_DIRS || process.env.SOURCE_DIR;
+  if (raw) {
+    const dirs = raw.split(/[,;:]/).map((d) => d.trim()).filter((d) => d.length > 0);
+    if (dirs.length > 0) return dirs;
+  }
+
+  return [resolve(import.meta.dir, "../..")];
+}
+
+async function saveWorkspaces(workspaces: string[]): Promise<string[]> {
+  const clean = Array.from(new Set(workspaces.map((w) => w.trim()).filter((w) => w.length > 0)));
+  await writeFile(CONFIG_PATH, JSON.stringify({ workspaces: clean }, null, 2), "utf-8");
+  return clean;
+}
+
+async function getProjectStatus(projectDir: string, workspace: string): Promise<ProjectStatus> {
   const name = basename(projectDir);
+  const workspaceName = basename(workspace) || workspace;
   const tgrepDir = join(projectDir, ".tgrep");
   let indexed = false;
   let running = false;
@@ -74,6 +104,8 @@ async function getProjectStatus(projectDir: string): Promise<ProjectStatus> {
   return {
     name,
     path: projectDir,
+    workspace,
+    workspaceName,
     indexed,
     running,
     pid,
@@ -84,38 +116,49 @@ async function getProjectStatus(projectDir: string): Promise<ProjectStatus> {
   };
 }
 
-async function listAllProjects(): Promise<ProjectStatus[]> {
-  try {
-    const entries = await readdir(SOURCE_DIR, { withFileTypes: true });
-    const projects: ProjectStatus[] = [];
+async function listAllProjects(): Promise<{ projects: ProjectStatus[]; workspaces: string[] }> {
+  const workspaces = await getWorkspaces();
+  const projects: ProjectStatus[] = [];
+  const seenPaths = new Set<string>();
 
-    for (const entry of entries) {
-      if (entry.isDirectory() && !entry.name.startsWith(".")) {
-        const fullPath = join(SOURCE_DIR, entry.name);
-        try {
-          const status = await getProjectStatus(fullPath);
-          projects.push(status);
-        } catch (err) {
-          console.error(`Error inspecting ${entry.name}:`, err);
+  for (const ws of workspaces) {
+    try {
+      const entries = await readdir(ws, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory() && !entry.name.startsWith(".")) {
+          const fullPath = join(ws, entry.name);
+          if (!seenPaths.has(fullPath)) {
+            seenPaths.add(fullPath);
+            try {
+              const status = await getProjectStatus(fullPath, ws);
+              projects.push(status);
+            } catch (err) {
+              console.error(`Error inspecting ${entry.name}:`, err);
+            }
+          }
         }
       }
+    } catch (err) {
+      console.warn(`Could not read workspace directory: ${ws}`, err);
     }
-
-    projects.sort((a, b) => a.name.localeCompare(b.name));
-    return projects;
-  } catch (err) {
-    console.error("Failed to read SOURCE_DIR:", SOURCE_DIR, err);
-    return [];
   }
+
+  projects.sort((a, b) => a.name.localeCompare(b.name));
+  return { projects, workspaces };
 }
 
 async function runManageAction(action: "start" | "stop" | "index", projectPath: string) {
+  const workspaces = await getWorkspaces();
   const cmd = isWindows
     ? ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", MANAGE_SCRIPT, action, projectPath]
     : [MANAGE_SCRIPT, action, projectPath];
 
   const proc = Bun.spawn(cmd, {
-    env: { ...process.env, SOURCE_DIR },
+    env: {
+      ...process.env,
+      SOURCE_DIRS: workspaces.join(","),
+      SOURCE_DIR: workspaces[0] || "",
+    },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -141,23 +184,26 @@ const HTML_CONTENT = `<!DOCTYPE html>
   <style>
     :root {
       --bulma-body-background-color: #0b1022;
-      --bulma-card-background-color: #151d32;
-      --bulma-box-background-color: #151d32;
-      --bulma-border: rgba(142, 223, 255, 0.15);
+      --bulma-card-background-color: #141c30;
+      --bulma-box-background-color: #141c30;
+      --bulma-border: rgba(142, 223, 255, 0.12);
     }
     body {
       background: radial-gradient(circle at top right, #131d3d 0%, #0b1022 60%);
       min-height: 100vh;
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
     .custom-box {
-      background: #151d32 !important;
+      background: #141c30 !important;
       border: 1px solid var(--bulma-border);
       border-radius: 1rem;
       box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
     }
     .stat-box {
-      background: #12192c !important;
+      background: #111728 !important;
       border: 1px solid var(--bulma-border);
       border-radius: 0.85rem;
       transition: transform 0.2s ease, border-color 0.2s ease;
@@ -167,7 +213,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
       border-color: rgba(142, 223, 255, 0.4);
     }
     .project-card {
-      background: #18233c !important;
+      background: #172138 !important;
       border: 1px solid rgba(255, 255, 255, 0.07);
       border-radius: 0.75rem;
       padding: 1.1rem;
@@ -175,9 +221,40 @@ const HTML_CONTENT = `<!DOCTYPE html>
       transition: all 0.2s ease;
     }
     .project-card:hover {
-      background: #1c2946 !important;
+      background: #1c2844 !important;
       border-color: rgba(142, 223, 255, 0.28);
-      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+    }
+    .group-header {
+      background: rgba(142, 223, 255, 0.04);
+      border-left: 3px solid #3e8ed0;
+      border-radius: 0 0.5rem 0.5rem 0;
+      padding: 0.5rem 1rem;
+      margin: 1.5rem 0 1rem 0;
+    }
+    .custom-table {
+      background: transparent !important;
+      color: #e4e7eb !important;
+    }
+    .custom-table thead th {
+      color: #9aa5b8 !important;
+      border-bottom: 2px solid var(--bulma-border) !important;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .custom-table tbody tr {
+      background: #151e34 !important;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
+      transition: background 0.15s ease;
+    }
+    .custom-table tbody tr:hover {
+      background: #1c2742 !important;
+    }
+    .custom-table td {
+      vertical-align: middle !important;
+      border: none !important;
+      padding: 0.75rem 0.75rem !important;
     }
     @keyframes pulse-dot {
       0%, 100% { opacity: 1; transform: scale(1); }
@@ -208,11 +285,35 @@ const HTML_CONTENT = `<!DOCTYPE html>
       color: #ff859c !important;
       border: 1px solid rgba(241, 70, 104, 0.25);
     }
+    .control-input {
+      background: #0e1424 !important;
+      border: 1px solid var(--bulma-border) !important;
+      color: #fff !important;
+    }
+    .control-input:focus {
+      border-color: #3e8ed0 !important;
+      box-shadow: 0 0 0 0.125em rgba(62, 142, 208, 0.25) !important;
+    }
+    .select select {
+      background: #0e1424 !important;
+      border-color: var(--bulma-border) !important;
+      color: #fff !important;
+    }
+    .modal-card {
+      background: #141c30 !important;
+      border: 1px solid var(--bulma-border);
+      border-radius: 1rem;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+    }
+    .modal-card-head, .modal-card-foot {
+      background: #101626 !important;
+      border-color: var(--bulma-border) !important;
+    }
     #toast {
       position: fixed;
       bottom: 2rem;
       right: 2rem;
-      z-index: 1000;
+      z-index: 2000;
       min-width: 320px;
       transform: translateY(120%);
       opacity: 0;
@@ -236,80 +337,185 @@ const HTML_CONTENT = `<!DOCTYPE html>
           </span>
           <div>
             <h1 class="title is-4 has-text-white mb-1">Codebase Index Manager</h1>
-            <p class="subtitle is-7 has-text-grey-light">Microsoft Trigram (<code class="has-text-info">tgrep</code>) Daemon & Multi-Repo Controller</p>
+            <p class="subtitle is-7 has-text-grey-light">Microsoft Trigram (<code class="has-text-info">tgrep</code>) Daemon &amp; Multi-Workspace Controller</p>
           </div>
         </div>
       </div>
       <div class="level-right">
         <div class="level-item">
           <div class="buttons">
-            <button onclick="fetchProjects()" class="button is-small is-dark is-rounded mr-2" id="refresh-btn">
-              <span class="icon is-small"><i class="fa-solid fa-rotate" id="refresh-icon"></i></span>
-              <span>Refresh</span>
+            <!-- View Mode Switcher -->
+            <div class="field has-addons mr-2 mb-0">
+              <p class="control">
+                <button onclick="setViewMode('cards')" id="btn-view-cards" class="button is-small is-dark is-rounded is-selected" title="Card Grid View">
+                  <span class="icon is-small"><i class="fa-solid fa-grip"></i></span>
+                  <span class="is-hidden-mobile">Cards</span>
+                </button>
+              </p>
+              <p class="control">
+                <button onclick="setViewMode('table')" id="btn-view-table" class="button is-small is-dark is-rounded" title="Compact Table View">
+                  <span class="icon is-small"><i class="fa-solid fa-list"></i></span>
+                  <span class="is-hidden-mobile">Table</span>
+                </button>
+              </p>
+            </div>
+            <!-- Settings Modal Button -->
+            <button onclick="openSettings()" class="button is-small is-dark is-rounded mr-2" title="Manage Workspaces (Multipath)">
+              <span class="icon is-small has-text-info"><i class="fa-solid fa-gear"></i></span>
+              <span class="is-hidden-mobile">Workspaces</span>
             </button>
-            <a href="javascript:history.back()" class="button is-small is-info is-outlined is-rounded">
-              <span class="icon is-small"><i class="fa-solid fa-arrow-left"></i></span>
-              <span>Back</span>
-            </a>
+            <!-- Refresh Button -->
+            <button onclick="fetchProjects()" class="button is-small is-dark is-rounded" id="refresh-btn" title="Refresh project list">
+              <span class="icon is-small"><i class="fa-solid fa-rotate" id="refresh-icon"></i></span>
+            </button>
           </div>
         </div>
       </div>
     </nav>
 
-    <!-- Stats Bar (Bulma Level) -->
+    <!-- Stats Bar (Bulma Columns) -->
     <div class="columns is-mobile mb-6">
       <div class="column">
-        <div class="stat-box p-4 has-text-centered">
-          <p class="heading has-text-grey">Repositories</p>
-          <p class="title is-4 has-text-white mt-1" id="stat-total">--</p>
+        <div class="stat-box p-3 has-text-centered">
+          <p class="heading has-text-grey is-size-7 mb-1">Workspaces</p>
+          <p class="title is-4 has-text-white" id="stat-workspaces">--</p>
         </div>
       </div>
       <div class="column">
-        <div class="stat-box p-4 has-text-centered">
-          <p class="heading has-text-success">Live Daemons</p>
-          <p class="title is-4 has-text-success mt-1" id="stat-running">--</p>
+        <div class="stat-box p-3 has-text-centered">
+          <p class="heading has-text-grey is-size-7 mb-1">Repositories</p>
+          <p class="title is-4 has-text-white" id="stat-total">--</p>
         </div>
       </div>
       <div class="column">
-        <div class="stat-box p-4 has-text-centered">
-          <p class="heading has-text-info">Indexed</p>
-          <p class="title is-4 has-text-info mt-1" id="stat-indexed">--</p>
+        <div class="stat-box p-3 has-text-centered">
+          <p class="heading has-text-success is-size-7 mb-1">Live Daemons</p>
+          <p class="title is-4 has-text-success" id="stat-running">--</p>
+        </div>
+      </div>
+      <div class="column">
+        <div class="stat-box p-3 has-text-centered">
+          <p class="heading has-text-info is-size-7 mb-1">Indexed</p>
+          <p class="title is-4 has-text-info" id="stat-indexed">--</p>
         </div>
       </div>
     </div>
 
-    <!-- Main Content Box -->
+    <!-- Main Content Container -->
     <div class="custom-box p-5">
-      <div class="level is-mobile mb-4">
+      <!-- Toolbar: Search, Sort, Group, Page Size -->
+      <div class="level mb-4">
         <div class="level-left">
           <div class="level-item">
-            <h2 class="title is-5 has-text-white mb-0">
-              <span class="icon-text">
-                <span class="icon has-text-grey"><i class="fa-solid fa-folder-tree"></i></span>
-                <span>Discovered Projects</span>
-              </span>
-            </h2>
-          </div>
-        </div>
-        <div class="level-right">
-          <div class="level-item">
-            <div class="field">
-              <p class="control has-icons-left">
-                <input class="input is-small is-rounded is-dark" id="search-input" type="text" placeholder="Filter repositories..." oninput="filterProjects()">
+            <div class="field mb-0">
+              <p class="control has-icons-left has-icons-right">
+                <input class="input is-small is-rounded control-input" id="search-input" type="text" placeholder="Filter by name, workspace, or status..." oninput="handleSearch()">
                 <span class="icon is-small is-left">
                   <i class="fa-solid fa-magnifying-glass"></i>
+                </span>
+                <span class="icon is-small is-right is-clickable is-hidden" id="clear-search-btn" onclick="clearSearch()">
+                  <i class="fa-solid fa-circle-xmark has-text-grey"></i>
                 </span>
               </p>
             </div>
           </div>
         </div>
+        <div class="level-right">
+          <div class="level-item">
+            <div class="field is-grouped is-grouped-multiline mb-0">
+              <!-- Group By -->
+              <div class="control">
+                <div class="select is-small is-rounded">
+                  <select id="group-select" onchange="handleFilterChange()">
+                    <option value="workspace">Group: Workspace</option>
+                    <option value="status">Group: Status</option>
+                    <option value="none">Group: Flat List</option>
+                  </select>
+                </div>
+              </div>
+              <!-- Sort By -->
+              <div class="control">
+                <div class="select is-small is-rounded">
+                  <select id="sort-select" onchange="handleFilterChange()">
+                    <option value="name-asc">Sort: Name (A → Z)</option>
+                    <option value="name-desc">Sort: Name (Z → A)</option>
+                    <option value="status">Sort: Active First</option>
+                    <option value="files-desc">Sort: Files (High → Low)</option>
+                    <option value="trigrams-desc">Sort: Trigrams (High → Low)</option>
+                  </select>
+                </div>
+              </div>
+              <!-- Page Size -->
+              <div class="control">
+                <div class="select is-small is-rounded">
+                  <select id="pagesize-select" onchange="handlePageSizeChange()">
+                    <option value="10">10 / page</option>
+                    <option value="25">25 / page</option>
+                    <option value="50">50 / page</option>
+                    <option value="all">All</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
+      <!-- Render Target Area -->
       <div id="projects-container">
         <div class="has-text-centered py-6 has-text-grey">
           <span class="icon is-large"><i class="fa-solid fa-spinner fa-spin fa-2x"></i></span>
           <p class="mt-2">Scanning workspace directories...</p>
         </div>
+      </div>
+
+      <!-- Pagination Footer -->
+      <nav class="pagination is-small is-centered is-rounded mt-5 pt-3" role="navigation" aria-label="pagination" id="pagination-nav" style="border-top: 1px solid rgba(255,255,255,0.06);">
+        <button class="pagination-previous button is-small is-dark" id="page-prev-btn" onclick="goToPage(currentPage - 1)">Previous</button>
+        <button class="pagination-next button is-small is-dark" id="page-next-btn" onclick="goToPage(currentPage + 1)">Next</button>
+        <ul class="pagination-list" id="pagination-pages"></ul>
+      </nav>
+      <p class="has-text-centered has-text-grey is-size-7 mt-2" id="pagination-summary"></p>
+    </div>
+
+    <!-- Workspace Configuration Modal -->
+    <div class="modal" id="settings-modal">
+      <div class="modal-background" onclick="closeSettings()"></div>
+      <div class="modal-card">
+        <header class="modal-card-head">
+          <p class="modal-card-title has-text-white is-size-5">
+            <span class="icon-text">
+              <span class="icon has-text-info mr-2"><i class="fa-solid fa-gear"></i></span>
+              <span>Workspace Directories (Multipath)</span>
+            </span>
+          </p>
+          <button class="delete" aria-label="close" onclick="closeSettings()"></button>
+        </header>
+        <section class="modal-card-body">
+          <p class="is-size-7 has-text-grey-light mb-4">
+            Configure root directories where your repositories are stored. The manager scans all workspaces simultaneously so AI agents can query any repo.
+          </p>
+
+          <div id="modal-workspaces-list" class="mb-4"></div>
+
+          <label class="label has-text-grey is-size-7">Add Workspace Path</label>
+          <div class="field has-addons">
+            <div class="control is-expanded">
+              <input class="input is-small control-input mono" id="new-workspace-input" type="text" placeholder="/path/to/my/projects or ~/other-repo">
+            </div>
+            <div class="control">
+              <button class="button is-small is-info" onclick="addWorkspacePath()">
+                <span class="icon is-small"><i class="fa-solid fa-plus"></i></span>
+                <span>Add</span>
+              </button>
+            </div>
+          </div>
+          <p class="help has-text-grey is-size-7">Use absolute paths. Relative paths are resolved relative to the tgrep-manager repository.</p>
+        </section>
+        <footer class="modal-card-foot is-justify-content-flex-end">
+          <button class="button is-small is-dark" onclick="closeSettings()">Cancel</button>
+          <button class="button is-small is-success" id="save-settings-btn" onclick="saveSettings()">Save &amp; Rescan</button>
+        </footer>
       </div>
     </div>
 
@@ -318,7 +524,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
       <p>tgrep-manager • Powered by <strong>Microsoft tgrep</strong> &amp; <strong>Bun</strong> • MIT License</p>
     </footer>
 
-    <!-- Toast Notification (Bulma Notification) -->
+    <!-- Toast Notification -->
     <div id="toast" class="notification is-dark">
       <button class="delete" onclick="hideToast()"></button>
       <div class="icon-text">
@@ -330,6 +536,33 @@ const HTML_CONTENT = `<!DOCTYPE html>
 
   <script>
     let allProjects = [];
+    let allWorkspaces = [];
+    let tempWorkspaces = [];
+    let currentPage = 1;
+    let viewMode = localStorage.getItem('tgrep_view') || 'cards';
+    let pageSize = localStorage.getItem('tgrep_pagesize') || '10';
+
+    document.getElementById('pagesize-select').value = pageSize;
+    updateViewButtons();
+
+    function setViewMode(mode) {
+      viewMode = mode;
+      localStorage.setItem('tgrep_view', mode);
+      updateViewButtons();
+      renderCurrentState();
+    }
+
+    function updateViewButtons() {
+      const btnCards = document.getElementById('btn-view-cards');
+      const btnTable = document.getElementById('btn-view-table');
+      if (viewMode === 'cards') {
+        btnCards.classList.add('is-info', 'is-selected');
+        btnTable.classList.remove('is-info', 'is-selected');
+      } else {
+        btnTable.classList.add('is-info', 'is-selected');
+        btnCards.classList.remove('is-info', 'is-selected');
+      }
+    }
 
     function showToast(message, type = 'info') {
       const toast = document.getElementById('toast');
@@ -366,8 +599,10 @@ const HTML_CONTENT = `<!DOCTYPE html>
 
       try {
         const res = await fetch('/api/projects');
-        allProjects = await res.json();
-        renderProjects(allProjects);
+        const data = await res.json();
+        allProjects = data.projects || [];
+        allWorkspaces = data.workspaces || [];
+        renderCurrentState();
       } catch (err) {
         showToast('Failed to fetch projects: ' + err.message, 'error');
       } finally {
@@ -375,28 +610,134 @@ const HTML_CONTENT = `<!DOCTYPE html>
       }
     }
 
-    function filterProjects() {
-      const query = document.getElementById('search-input').value.toLowerCase();
-      const filtered = allProjects.filter(p => p.name.toLowerCase().includes(query));
-      renderProjects(filtered);
+    function handleSearch() {
+      const val = document.getElementById('search-input').value;
+      const clearBtn = document.getElementById('clear-search-btn');
+      if (val) {
+        clearBtn.classList.remove('is-hidden');
+      } else {
+        clearBtn.classList.add('is-hidden');
+      }
+      currentPage = 1;
+      renderCurrentState();
     }
 
-    function renderProjects(projects) {
+    function clearSearch() {
+      document.getElementById('search-input').value = '';
+      document.getElementById('clear-search-btn').classList.add('is-hidden');
+      currentPage = 1;
+      renderCurrentState();
+    }
+
+    function handleFilterChange() {
+      currentPage = 1;
+      renderCurrentState();
+    }
+
+    function handlePageSizeChange() {
+      pageSize = document.getElementById('pagesize-select').value;
+      localStorage.setItem('tgrep_pagesize', pageSize);
+      currentPage = 1;
+      renderCurrentState();
+    }
+
+    function goToPage(page) {
+      currentPage = page;
+      renderCurrentState();
+    }
+
+    function getProcessedProjects() {
+      const query = document.getElementById('search-input').value.toLowerCase().trim();
+      const sort = document.getElementById('sort-select').value;
+
+      let list = allProjects.slice();
+
+      if (query) {
+        list = list.filter(p => {
+          const statusStr = p.running ? 'serving running active' : p.indexed ? 'indexed idle' : 'unindexed stopped';
+          return p.name.toLowerCase().includes(query) ||
+                 p.workspace.toLowerCase().includes(query) ||
+                 p.path.toLowerCase().includes(query) ||
+                 statusStr.includes(query);
+        });
+      }
+
+      list.sort((a, b) => {
+        if (sort === 'name-asc') return a.name.localeCompare(b.name);
+        if (sort === 'name-desc') return b.name.localeCompare(a.name);
+        if (sort === 'status') {
+          const score = (p) => (p.running ? 2 : p.indexed ? 1 : 0);
+          return score(b) - score(a) || a.name.localeCompare(b.name);
+        }
+        if (sort === 'files-desc') return (b.files || 0) - (a.files || 0);
+        if (sort === 'trigrams-desc') return (b.trigrams || 0) - (a.trigrams || 0);
+        return 0;
+      });
+
+      return list;
+    }
+
+    function renderCurrentState() {
+      // Update top stat cards
+      document.getElementById('stat-workspaces').innerText = allWorkspaces.length;
+      document.getElementById('stat-total').innerText = allProjects.length;
+      document.getElementById('stat-running').innerText = allProjects.filter(p => p.running).length;
+      document.getElementById('stat-indexed').innerText = allProjects.filter(p => p.indexed).length;
+
+      const processed = getProcessedProjects();
+      const groupMode = document.getElementById('group-select').value;
       const container = document.getElementById('projects-container');
-      const statTotal = document.getElementById('stat-total');
-      const statRunning = document.getElementById('stat-running');
-      const statIndexed = document.getElementById('stat-indexed');
 
-      statTotal.innerText = allProjects.length;
-      statRunning.innerText = allProjects.filter(p => p.running).length;
-      statIndexed.innerText = allProjects.filter(p => p.indexed).length;
-
-      if (projects.length === 0) {
-        container.innerHTML = '<div class="has-text-centered py-6 has-text-grey">No repositories match your filter</div>';
+      if (processed.length === 0) {
+        container.innerHTML = '<div class="has-text-centered py-6 has-text-grey"><i class="fa-solid fa-magnifying-glass fa-2x mb-3"></i><p>No repositories match your criteria</p></div>';
+        updatePagination(0, 1, 10);
         return;
       }
 
+      const limit = pageSize === 'all' ? processed.length : parseInt(pageSize, 10);
+      const totalPages = Math.ceil(processed.length / limit);
+      if (currentPage > totalPages) currentPage = totalPages || 1;
+      const startIndex = (currentPage - 1) * limit;
+      const paginated = processed.slice(startIndex, startIndex + limit);
+
+      updatePagination(processed.length, currentPage, limit);
+
+      if (groupMode === 'none') {
+        container.innerHTML = viewMode === 'cards' ? renderCards(paginated) : renderTable(paginated);
+      } else {
+        container.innerHTML = renderGrouped(paginated, groupMode);
+      }
+    }
+
+    function renderGrouped(items, mode) {
+      const groups = {};
+      items.forEach(item => {
+        const key = mode === 'workspace'
+          ? item.workspace
+          : item.running ? 'Serving (Live)' : item.indexed ? 'Indexed (Idle)' : 'Not Indexed';
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(item);
+      });
+
       let html = '';
+      for (const [groupName, groupItems] of Object.entries(groups)) {
+        const icon = mode === 'workspace' ? 'fa-folder-tree has-text-info' : 'fa-layer-group has-text-warning';
+        html += \`
+          <div class="group-header is-flex is-justify-content-between is-align-items-center">
+            <span class="icon-text">
+              <span class="icon"><i class="fa-solid \${icon}"></i></span>
+              <strong class="has-text-light mono is-size-6">\${groupName}</strong>
+            </span>
+            <span class="tag is-dark is-rounded">\${groupItems.length} repos</span>
+          </div>
+        \`;
+        html += viewMode === 'cards' ? renderCards(groupItems) : renderTable(groupItems);
+      }
+      return html;
+    }
+
+    function renderCards(projects) {
+      let html = '<div class="project-cards-wrapper">';
       projects.forEach(p => {
         const statusBadge = p.running
           ? \`<span class="tag is-serving is-rounded">
@@ -412,23 +753,23 @@ const HTML_CONTENT = `<!DOCTYPE html>
 
         const details = p.indexed
           ? \`<div class="tags has-addons are-small mt-2 mb-0">
-               <span class="tag is-dark"><i class="fa-regular fa-file-code mr-1"></i> \${p.files ? Number(p.files).toLocaleString() : '0'} files</span>
-               <span class="tag is-dark"><i class="fa-solid fa-hashtag mr-1"></i> \${p.trigrams ? (p.trigrams >= 1000 ? (p.trigrams/1000).toFixed(1) + 'k' : p.trigrams) : '0'} trigrams</span>
+               <span class="tag is-dark mono"><i class="fa-regular fa-file-code mr-1"></i> \${p.files ? Number(p.files).toLocaleString() : '0'} files</span>
+               <span class="tag is-dark mono"><i class="fa-solid fa-hashtag mr-1"></i> \${p.trigrams ? (p.trigrams >= 1000 ? (p.trigrams/1000).toFixed(1) + 'k' : p.trigrams) : '0'} trigrams</span>
                \${p.updated ? \`<span class="tag is-dark is-hidden-mobile"><i class="fa-regular fa-clock mr-1"></i> \${p.updated}</span>\` : ''}
              </div>\`
-          : \`<p class="is-size-7 has-text-grey mt-1">No trigram index yet</p>\`;
+          : \`<p class="is-size-7 has-text-grey mt-1">No trigram index created yet</p>\`;
 
         const startBtn = p.running
-          ? \`<button onclick="triggerAction('stop', '\${p.name}')" class="button is-small is-danger is-outlined is-rounded">
+          ? \`<button onclick="triggerAction('stop', '\${escapeStr(p.path)}')" class="button is-small is-danger is-outlined is-rounded">
                <span class="icon is-small"><i class="fa-solid fa-stop"></i></span>
                <span>Stop</span>
              </button>\`
-          : \`<button onclick="triggerAction('start', '\${p.name}')" class="button is-small is-success is-outlined is-rounded">
+          : \`<button onclick="triggerAction('start', '\${escapeStr(p.path)}')" class="button is-small is-success is-outlined is-rounded">
                <span class="icon is-small"><i class="fa-solid fa-play"></i></span>
                <span>Start</span>
              </button>\`;
 
-        const indexBtn = \`<button onclick="triggerAction('index', '\${p.name}')" class="button is-small is-dark is-rounded mr-2">
+        const indexBtn = \`<button onclick="triggerAction('index', '\${escapeStr(p.path)}')" class="button is-small is-dark is-rounded mr-2" title="Rebuild trigram index">
                <span class="icon is-small has-text-info"><i class="fa-solid fa-rotate"></i></span>
                <span>\${p.indexed ? 'Re-Index' : 'Index'}</span>
              </button>\`;
@@ -438,8 +779,9 @@ const HTML_CONTENT = `<!DOCTYPE html>
             <div class="level is-mobile mb-0">
               <div class="level-left">
                 <div>
-                  <div class="is-flex is-align-items-center">
-                    <span class="has-text-weight-bold has-text-white is-family-monospace mr-3 is-size-5">\${p.name}</span>
+                  <div class="is-flex is-align-items-center is-flex-wrap-wrap" style="gap: 0.5rem;">
+                    <span class="has-text-weight-bold has-text-white mono is-size-5">\${p.name}</span>
+                    <span class="tag is-dark is-rounded is-size-7 mono" title="\${p.path}"><i class="fa-regular fa-folder mr-1 has-text-grey"></i>\${p.workspaceName}</span>
                     \${statusBadge}
                   </div>
                   \${details}
@@ -455,27 +797,205 @@ const HTML_CONTENT = `<!DOCTYPE html>
           </div>
         \`;
       });
-
-      container.innerHTML = html;
+      html += '</div>';
+      return html;
     }
 
-    async function triggerAction(action, projectName) {
-      showToast(\`Executing \${action} on \${projectName}...\`, 'info');
+    function renderTable(projects) {
+      let html = \`
+        <div class="table-container">
+          <table class="table is-fullwidth custom-table">
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Repository</th>
+                <th>Workspace</th>
+                <th>Port / PID</th>
+                <th>Files</th>
+                <th>Trigrams</th>
+                <th class="has-text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+      \`;
+
+      projects.forEach(p => {
+        const statusBadge = p.running
+          ? \`<span class="tag is-serving is-rounded is-small"><span class="pulse-dot"></span> Serving</span>\`
+          : p.indexed
+          ? \`<span class="tag is-idle is-rounded is-small"><i class="fa-solid fa-check mr-1"></i> Idle</span>\`
+          : \`<span class="tag is-unindexed is-rounded is-small">Unindexed</span>\`;
+
+        const portPid = p.running ? \`:\${p.port} (\${p.pid})\` : '-';
+        const files = p.files ? Number(p.files).toLocaleString() : '-';
+        const trigrams = p.trigrams ? (p.trigrams >= 1000 ? (p.trigrams/1000).toFixed(1) + 'k' : p.trigrams) : '-';
+
+        const startBtn = p.running
+          ? \`<button onclick="triggerAction('stop', '\${escapeStr(p.path)}')" class="button is-small is-danger is-outlined is-rounded" title="Stop daemon">
+               <span class="icon is-small"><i class="fa-solid fa-stop"></i></span>
+             </button>\`
+          : \`<button onclick="triggerAction('start', '\${escapeStr(p.path)}')" class="button is-small is-success is-outlined is-rounded" title="Start daemon">
+               <span class="icon is-small"><i class="fa-solid fa-play"></i></span>
+             </button>\`;
+
+        const indexBtn = \`<button onclick="triggerAction('index', '\${escapeStr(p.path)}')" class="button is-small is-dark is-rounded mr-1" title="Rebuild Index">
+               <span class="icon is-small has-text-info"><i class="fa-solid fa-rotate"></i></span>
+             </button>\`;
+
+        html += \`
+          <tr>
+            <td>\${statusBadge}</td>
+            <td class="mono has-text-weight-semibold has-text-white">\${p.name}</td>
+            <td class="mono is-size-7 has-text-grey" title="\${p.path}">\${p.workspaceName}</td>
+            <td class="mono is-size-7">\${portPid}</td>
+            <td class="mono is-size-7">\${files}</td>
+            <td class="mono is-size-7">\${trigrams}</td>
+            <td class="has-text-right">
+              <div class="buttons are-small is-right mb-0">
+                \${indexBtn}
+                \${startBtn}
+              </div>
+            </td>
+          </tr>
+        \`;
+      });
+
+      html += '</tbody></table></div>';
+      return html;
+    }
+
+    function updatePagination(totalItems, current, limit) {
+      const nav = document.getElementById('pagination-nav');
+      const pagesContainer = document.getElementById('pagination-pages');
+      const summary = document.getElementById('pagination-summary');
+      const prevBtn = document.getElementById('page-prev-btn');
+      const nextBtn = document.getElementById('page-next-btn');
+
+      if (totalItems <= limit || limit >= 100000) {
+        nav.classList.add('is-hidden');
+        summary.innerText = \`Showing all \${totalItems} repositories\`;
+        return;
+      }
+
+      nav.classList.remove('is-hidden');
+      const totalPages = Math.ceil(totalItems / limit);
+      const from = (current - 1) * limit + 1;
+      const to = Math.min(current * limit, totalItems);
+      summary.innerText = \`Showing \${from}–\${to} of \${totalItems} repositories\`;
+
+      prevBtn.disabled = current <= 1;
+      nextBtn.disabled = current >= totalPages;
+
+      let pagesHtml = '';
+      for (let i = 1; i <= totalPages; i++) {
+        if (i === 1 || i === totalPages || (i >= current - 1 && i <= current + 1)) {
+          pagesHtml += \`
+            <li>
+              <a class="pagination-link \${i === current ? 'is-current' : ''}" onclick="goToPage(\${i})">\${i}</a>
+            </li>
+          \`;
+        } else if (i === current - 2 || i === current + 2) {
+          pagesHtml += '<li><span class="pagination-ellipsis">&hellip;</span></li>';
+        }
+      }
+      pagesContainer.innerHTML = pagesHtml;
+    }
+
+    function escapeStr(str) {
+      return str.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'");
+    }
+
+    async function triggerAction(action, projectPath) {
+      showToast(\`Executing \${action}...\`, 'info');
       try {
         const res = await fetch('/api/action', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action, project: projectName })
+          body: JSON.stringify({ action, path: projectPath })
         });
         const result = await res.json();
         if (result.success) {
-          showToast(\`\${action} on \${projectName} completed successfully!\`, 'success');
+          showToast(\`Action '\${action}' succeeded!\`, 'success');
         } else {
           showToast(\`Failed: \${result.output || 'Unknown error'}\`, 'error');
         }
         await fetchProjects();
       } catch (err) {
         showToast(\`Action failed: \${err.message}\`, 'error');
+      }
+    }
+
+    function openSettings() {
+      tempWorkspaces = [...allWorkspaces];
+      renderModalWorkspaces();
+      document.getElementById('settings-modal').classList.add('is-active');
+    }
+
+    function closeSettings() {
+      document.getElementById('settings-modal').classList.remove('is-active');
+    }
+
+    function renderModalWorkspaces() {
+      const container = document.getElementById('modal-workspaces-list');
+      let html = '';
+      tempWorkspaces.forEach((ws, index) => {
+        html += \`
+          <div class="field has-addons mb-2">
+            <div class="control is-expanded">
+              <input class="input is-small control-input mono" type="text" value="\${ws}" readonly>
+            </div>
+            <div class="control">
+              <button class="button is-small is-danger is-outlined" onclick="removeWorkspace(\${index})" \${tempWorkspaces.length <= 1 ? 'disabled title="At least one workspace required"' : ''}>
+                <span class="icon is-small"><i class="fa-solid fa-trash"></i></span>
+              </button>
+            </div>
+          </div>
+        \`;
+      });
+      container.innerHTML = html;
+    }
+
+    function addWorkspacePath() {
+      const input = document.getElementById('new-workspace-input');
+      const val = input.value.trim();
+      if (!val) return;
+      if (tempWorkspaces.includes(val)) {
+        showToast('Workspace already added', 'error');
+        return;
+      }
+      tempWorkspaces.push(val);
+      input.value = '';
+      renderModalWorkspaces();
+    }
+
+    function removeWorkspace(index) {
+      if (tempWorkspaces.length <= 1) return;
+      tempWorkspaces.splice(index, 1);
+      renderModalWorkspaces();
+    }
+
+    async function saveSettings() {
+      const btn = document.getElementById('save-settings-btn');
+      btn.classList.add('is-loading');
+      try {
+        const res = await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspaces: tempWorkspaces })
+        });
+        const result = await res.json();
+        if (result.success) {
+          showToast('Workspace paths saved successfully!', 'success');
+          allWorkspaces = result.workspaces;
+          closeSettings();
+          await fetchProjects();
+        } else {
+          showToast('Failed to save config: ' + result.output, 'error');
+        }
+      } catch (err) {
+        showToast('Error saving settings: ' + err.message, 'error');
+      } finally {
+        btn.classList.remove('is-loading');
       }
     }
 
@@ -497,31 +1017,71 @@ Bun.serve({
     }
 
     if (url.pathname === "/api/projects" && req.method === "GET") {
-      const projects = await listAllProjects();
-      return Response.json(projects);
+      const data = await listAllProjects();
+      return Response.json(data);
+    }
+
+    if (url.pathname === "/api/config" && req.method === "GET") {
+      const workspaces = await getWorkspaces();
+      return Response.json({ workspaces });
+    }
+
+    if (url.pathname === "/api/config" && req.method === "POST") {
+      try {
+        const body = await req.json();
+        const workspaces = body.workspaces;
+        if (!Array.isArray(workspaces)) {
+          return Response.json({ success: false, output: "Expected array of workspaces" }, { status: 400 });
+        }
+        const saved = await saveWorkspaces(workspaces);
+        return Response.json({ success: true, workspaces: saved });
+      } catch (err: any) {
+        return Response.json({ success: false, output: err.message }, { status: 500 });
+      }
     }
 
     if (url.pathname === "/api/widget" && req.method === "GET") {
-      const projects = await listAllProjects();
-      const running = projects.filter((p) => p.running).length;
-      const indexed = projects.filter((p) => p.indexed).length;
+      const data = await listAllProjects();
+      const running = data.projects.filter((p) => p.running).length;
+      const indexed = data.projects.filter((p) => p.indexed).length;
       return Response.json({
         running,
         indexed,
-        total: projects.length,
+        total: data.projects.length,
+        workspaces: data.workspaces.length,
       });
     }
 
     if (url.pathname === "/api/action" && req.method === "POST") {
       try {
         const body = await req.json();
-        const { action, project } = body;
-        if (!["start", "stop", "index"].includes(action) || !project) {
-          return Response.json({ success: false, output: "Invalid parameters" }, { status: 400 });
+        const { action, path, project } = body;
+        if (!["start", "stop", "index"].includes(action)) {
+          return Response.json({ success: false, output: "Invalid action" }, { status: 400 });
         }
 
-        const projectPath = join(SOURCE_DIR, project);
-        const result = await runManageAction(action, projectPath);
+        let targetPath = path;
+        if (!targetPath && project) {
+          const workspaces = await getWorkspaces();
+          for (const ws of workspaces) {
+            const p = join(ws, project);
+            try {
+              const s = await stat(p);
+              if (s.isDirectory()) {
+                targetPath = p;
+                break;
+              }
+            } catch {
+              // continue search
+            }
+          }
+        }
+
+        if (!targetPath) {
+          return Response.json({ success: false, output: "Project target path not found" }, { status: 404 });
+        }
+
+        const result = await runManageAction(action, targetPath);
         return Response.json(result);
       } catch (err: any) {
         return Response.json({ success: false, output: err.message }, { status: 500 });
