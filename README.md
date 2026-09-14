@@ -1,6 +1,6 @@
-# ⚡ tgrep-manager
+# ⚡ tgrep-cockpit
 
-> Cross-platform Web Dashboard & CLI Daemon Controller for [Microsoft tgrep](https://github.com/microsoft/tgrep) (Trigram Inverted-Index Code Search) across multi-repository workspaces.
+> Cross-platform Web Cockpit & CLI Daemon Controller for [Microsoft tgrep](https://github.com/microsoft/tgrep) (Trigram Inverted-Index Code Search) across multi-repository workspaces.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Runtime: Bun](https://img.shields.io/badge/Runtime-Bun-black?logo=bun)](https://bun.sh)
@@ -19,7 +19,7 @@ When integrating with AI coding assistants (**Claude Code**, **Codex**, **Antigr
 2. **Resource efficiency**: Developers don't want every repo burning background CPU/RAM when idle.
 3. **AI agent alignment**: AI agents default to unindexed brute-force `grep` unless instructed to prioritize indexed tools.
 
-**`tgrep-manager`** solves all of this:
+**`tgrep-cockpit`** solves all of this:
 - 🖥️ **Bulma 1.0 Dark Mode Web UI**: An elegant, high-density dashboard on port `3150` to view, start, stop, and re-index repositories on demand.
 - ⚡ **Cross-Platform CLI**: Native scripts for **Linux/macOS** (`.sh`) and **Windows** (`.ps1`).
 - 📊 **Real-Time Telemetry & Widget API**: Built-in `/api/widget` endpoint providing live counters (Active Daemons, Indexed Repos, Total Repos) and health monitors.
@@ -32,7 +32,7 @@ When integrating with AI coding assistants (**Claude Code**, **Codex**, **Antigr
 ```mermaid
 flowchart TD
     subgraph Dashboard["Web & Dashboard Layer"]
-        WEB["tgrep-manager Web UI (:3150)"]
+        WEB["tgrep-cockpit Web UI (:3150)"]
     end
 
     subgraph Agents["AI Coding Agents"]
@@ -41,7 +41,7 @@ flowchart TD
         AG["Antigravity"] -->|CLI| TG_CLI
     end
 
-    subgraph Controller["Management Core (tgrep-manager)"]
+    subgraph Controller["Management Core (tgrep-cockpit)"]
         WEB --> SCRIPT["bin/tgrep-manage.sh (or .ps1 on Windows)"]
         SCRIPT --> REPO1["Repo A (:38499, inotify active)"]
         SCRIPT --> REPO2["Repo B (:40212, inotify active)"]
@@ -136,14 +136,14 @@ git config --global core.excludesfile "$env:USERPROFILE\.config\git\ignore"
 
 ---
 
-## 🚀 Running `tgrep-manager`
+## 🚀 Running `tgrep-cockpit`
 
 ### Option A: Run Natively with Bun (All Platforms)
 
 ```bash
 # Clone the repository
-git clone https://github.com/<YOUR_USERNAME>/tgrep-manager.git
-cd tgrep-manager
+git clone https://github.com/<YOUR_USERNAME>/tgrep-cockpit.git
+cd tgrep-cockpit
 
 # Start the dashboard (scans parent directory by default)
 bun run src/server.ts
@@ -159,9 +159,9 @@ Open **`http://localhost:3150`** in your browser.
 
 ```bash
 mkdir -p ~/.config/systemd/user
-cp systemd/tgrep-manager.service ~/.config/systemd/user/
+cp systemd/tgrep-cockpit.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now tgrep-manager.service
+systemctl --user enable --now tgrep-cockpit.service
 
 # (Optional) Allow service to run at boot without active SSH session:
 sudo loginctl enable-linger $USER
@@ -221,4 +221,4 @@ WORKSPACE_DIR=/path/to/source-code docker compose up -d
 
 ## 📄 License
 
-MIT © 2026 tgrep-manager contributors
+MIT © 2026 tgrep-cockpit contributors

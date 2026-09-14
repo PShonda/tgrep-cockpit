@@ -1,7 +1,7 @@
 services:
-  tgrep-manager:
+  tgrep-cockpit:
     build: .
-    container_name: tgrep-manager
+    container_name: tgrep-cockpit
     restart: unless-stopped
     ports:
       - "3150:3150"

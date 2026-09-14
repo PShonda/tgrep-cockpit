@@ -604,7 +604,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
               </button>
             </div>
           </div>
-          <p class="help has-text-grey is-size-7">Use absolute paths. Relative paths are resolved relative to the tgrep-manager repository.</p>
+          <p class="help has-text-grey is-size-7">Use absolute paths. Relative paths are resolved relative to the tgrep-cockpit repository.</p>
         </section>
         <footer class="modal-card-foot is-justify-content-flex-end">
           <button class="button is-small is-dark" onclick="closeSettings()">Cancel</button>
@@ -615,7 +615,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
 
     <!-- Footer -->
     <footer class="has-text-centered mt-6 has-text-grey is-size-7">
-      <p>tgrep-manager • Powered by <strong>Microsoft tgrep</strong> &amp; <strong>Bun</strong> • MIT License</p>
+      <p>tgrep-cockpit • Powered by <strong>Microsoft tgrep</strong> &amp; <strong>Bun</strong> • MIT License</p>
     </footer>
 
     <!-- Toast Notification -->

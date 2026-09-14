@@ -1,10 +1,10 @@
 [Unit]
-Description=Codebase Index Web Manager (tgrep controller)
+Description=Codebase Index Web Cockpit (tgrep controller)
 After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/source-code/tgrep-manager
+WorkingDirectory=%h/source-code/tgrep-cockpit
 Environment="PATH=%h/.bun/bin:/usr/local/bin:/usr/bin:/bin"
 ExecStart=%h/.bun/bin/bun src/server.ts
 Restart=always

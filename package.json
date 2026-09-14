@@ -1,7 +1,7 @@
 {
-  "name": "tgrep-manager",
+  "name": "tgrep-cockpit",
   "version": "1.0.0",
-  "description": "Cross-platform Web Dashboard and CLI daemon controller for Microsoft tgrep (Trigram Index) code search in multi-repo environments",
+  "description": "Cross-platform Web Cockpit and CLI daemon controller for Microsoft tgrep (Trigram Index) code search in multi-repo environments",
   "main": "src/server.ts",
   "scripts": {
     "start": "bun run src/server.ts",
