@@ -142,7 +142,7 @@ git config --global core.excludesfile "$env:USERPROFILE\.config\git\ignore"
 
 ```bash
 # Clone the repository
-git clone https://github.com/<YOUR_USERNAME>/tgrep-cockpit.git
+git clone https://github.com/PShonda/tgrep-cockpit.git
 cd tgrep-cockpit
 
 # Start the dashboard (scans parent directory by default)
