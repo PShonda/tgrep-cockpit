@@ -34,13 +34,23 @@ is_running() {
   local sjson="$target/.tgrep/serve.json"
   if [[ -f "$sjson" ]]; then
     local pid
-    pid=$(jq -r '.pid // empty' "$sjson" 2>/dev/null || grep -o '"pid":[0-9]*' "$sjson" | cut -d: -f2)
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-      echo "$pid"
-      return 0
-    else
-      rm -f "$sjson" "$target/.tgrep/serve.lock"
+    pid=$(jq -r '.pid // empty' "$sjson" 2>/dev/null || grep -o '"pid"[[:space:]]*:[[:space:]]*[0-9]*' "$sjson" | cut -d: -f2 | tr -d ' ')
+    if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]]; then
+      if kill -0 "$pid" 2>/dev/null; then
+        local pname=""
+        if [[ -f "/proc/$pid/comm" ]]; then
+          pname=$(cat "/proc/$pid/comm" 2>/dev/null || echo "")
+        elif command -v ps >/dev/null 2>&1; then
+          pname=$(ps -p "$pid" -o comm= 2>/dev/null || echo "")
+        fi
+
+        if [[ -z "$pname" || "$pname" =~ tgrep ]]; then
+          echo "$pid"
+          return 0
+        fi
+      fi
     fi
+    rm -f "$sjson" "$target/.tgrep/serve.lock"
   fi
   return 1
 }
@@ -71,7 +81,7 @@ cmd_list() {
           local pid
           if pid=$(is_running "$d"); then
             local port
-            port=$(jq -r '.port // empty' "$d/.tgrep/serve.json" 2>/dev/null || grep -o '"port":[0-9]*' "$d/.tgrep/serve.json" | cut -d: -f2)
+            port=$(jq -r '.port // empty' "$d/.tgrep/serve.json" 2>/dev/null || grep -o '"port"[[:space:]]*:[[:space:]]*[0-9]*' "$d/.tgrep/serve.json" | cut -d: -f2 | tr -d ' ')
             sstatus="Running"
             detail=":${port} (PID:${pid})"
           fi
@@ -117,16 +127,20 @@ cmd_start() {
   rm -f "$target/.tgrep/serve.json" "$target/.tgrep/serve.lock"
 
   cd "$target"
-  nohup setsid tgrep serve . </dev/null > "$target/.tgrep/serve.log" 2>&1 &
-  disown
+  if command -v setsid >/dev/null 2>&1; then
+    nohup setsid tgrep serve . </dev/null > "$target/.tgrep/serve.log" 2>&1 &
+  else
+    nohup tgrep serve . </dev/null > "$target/.tgrep/serve.log" 2>&1 &
+  fi
+  disown 2>/dev/null || true
 
   local max_wait=30
   local count=0
   while [[ $count -lt $max_wait ]]; do
     if [[ -f "$target/.tgrep/serve.json" ]]; then
       local port pid
-      pid=$(jq -r '.pid // empty' "$target/.tgrep/serve.json" 2>/dev/null || grep -o '"pid":[0-9]*' "$target/.tgrep/serve.json" | cut -d: -f2)
-      port=$(jq -r '.port // empty' "$target/.tgrep/serve.json" 2>/dev/null || grep -o '"port":[0-9]*' "$target/.tgrep/serve.json" | cut -d: -f2)
+      pid=$(jq -r '.pid // empty' "$target/.tgrep/serve.json" 2>/dev/null || grep -o '"pid"[[:space:]]*:[[:space:]]*[0-9]*' "$target/.tgrep/serve.json" | cut -d: -f2 | tr -d ' ')
+      port=$(jq -r '.port // empty' "$target/.tgrep/serve.json" 2>/dev/null || grep -o '"port"[[:space:]]*:[[:space:]]*[0-9]*' "$target/.tgrep/serve.json" | cut -d: -f2 | tr -d ' ')
       if [[ -n "$pid" && -n "$port" ]] && kill -0 "$pid" 2>/dev/null; then
         echo "✓ Server successfully started!"
         echo "  Project : $target"
@@ -139,7 +153,11 @@ cmd_start() {
     count=$((count + 1))
   done
 
-  echo "Warning: Server started but serve.json was not generated immediately. Check $target/.tgrep/serve.log"
+  echo "Error: Server failed to start or serve.json was not generated within timeout. Check $target/.tgrep/serve.log" >&2
+  if [[ -f "$target/.tgrep/serve.log" ]]; then
+    tail -n 10 "$target/.tgrep/serve.log" >&2
+  fi
+  return 1
 }
 
 cmd_stop() {

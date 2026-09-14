@@ -5,6 +5,8 @@ services:
     restart: unless-stopped
     ports:
       - "3150:3150"
+    # Note: On Linux, you can use network_mode: "host" so host AI agents can reach dynamic daemon ports
+    # network_mode: "host"
     volumes:
       # Mount your workspace directory containing repositories
       - ${WORKSPACE_DIR:-./sample-projects}:/source-code

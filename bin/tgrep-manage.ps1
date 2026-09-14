@@ -51,10 +51,15 @@ function Resolve-ProjectPath([string]$path) {
     foreach ($ws in $Workspaces) {
         $combined = Join-Path $ws $path
         if (Test-Path $combined) {
-            return (Resolve-Path $combined).Path
+            return (Resolve-Path $combined -ErrorAction SilentlyContinue).Path
         }
     }
-    return (Resolve-Path (Join-Path (Get-Location) $path)).Path
+    $local = Join-Path (Get-Location) $path
+    $resolved = Resolve-Path $local -ErrorAction SilentlyContinue
+    if ($resolved) {
+        return $resolved.Path
+    }
+    return $path
 }
 
 function Get-RunningServer([string]$projectPath) {
@@ -62,9 +67,9 @@ function Get-RunningServer([string]$projectPath) {
     if (Test-Path $serveJson) {
         try {
             $json = Get-Content $serveJson -Raw | ConvertFrom-Json
-            if ($json.pid) {
+            if ($json.pid -and [int]$json.pid -gt 1) {
                 $process = Get-Process -Id $json.pid -ErrorAction SilentlyContinue
-                if ($process) {
+                if ($process -and $process.ProcessName -match "tgrep") {
                     return $json
                 } else {
                     # Stale file cleanup
@@ -170,7 +175,8 @@ function Start-Server([string]$projectPath) {
         $count++
     }
 
-    Write-Warning "Server started (PID: $($proc.Id)) but serve.json was not ready immediately. Check $logFile"
+    Write-Error "Server failed to start or serve.json was not generated within timeout. Check $logFile"
+    exit 1
 }
 
 function Stop-Server([string]$projectPath) {

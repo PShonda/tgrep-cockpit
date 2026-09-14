@@ -1,7 +1,8 @@
-import { readdir, stat, readFile, writeFile } from "node:fs/promises";
-import { join, basename, resolve } from "node:path";
+import { readdir, stat, readFile, writeFile, realpath } from "node:fs/promises";
+import { join, basename, resolve, relative, isAbsolute } from "node:path";
 
 const PORT = parseInt(process.env.PORT || "3150", 10);
+const HOST = process.env.HOST || "0.0.0.0";
 const isWindows = process.platform === "win32";
 const MANAGE_SCRIPT = isWindows
   ? resolve(import.meta.dir, "../bin/tgrep-manage.ps1")
@@ -22,6 +23,14 @@ interface ProjectStatus {
   updated?: string;
 }
 
+// In-memory status cache to eliminate disk I/O thrashing on frequent polling
+let cachedData: { projects: ProjectStatus[]; workspaces: string[]; timestamp: number } | null = null;
+const CACHE_TTL_MS = 3000;
+
+function invalidateCache() {
+  cachedData = null;
+}
+
 async function getWorkspaces(): Promise<string[]> {
   try {
     const content = await readFile(CONFIG_PATH, "utf-8");
@@ -36,7 +45,9 @@ async function getWorkspaces(): Promise<string[]> {
 
   const raw = process.env.SOURCE_DIRS || process.env.SOURCE_DIR;
   if (raw) {
-    const dirs = raw.split(/[,;:]/).map((d) => d.trim()).filter((d) => d.length > 0);
+    // Windows drive letters (C:\) contain colons, so split only on commas or semicolons
+    const separator = isWindows ? /[,;]/ : /[,;:]/;
+    const dirs = raw.split(separator).map((d) => d.trim()).filter((d) => d.length > 0);
     if (dirs.length > 0) return dirs;
   }
 
@@ -44,9 +55,44 @@ async function getWorkspaces(): Promise<string[]> {
 }
 
 async function saveWorkspaces(workspaces: string[]): Promise<string[]> {
-  const clean = Array.from(new Set(workspaces.map((w) => w.trim()).filter((w) => w.length > 0)));
+  const validated: string[] = [];
+  for (const w of workspaces) {
+    if (typeof w === "string" && w.trim()) {
+      try {
+        const s = await stat(w.trim());
+        if (s.isDirectory()) {
+          validated.push(w.trim());
+        }
+      } catch {
+        // Skip invalid directories
+      }
+    }
+  }
+  const clean = Array.from(new Set(validated));
   await writeFile(CONFIG_PATH, JSON.stringify({ workspaces: clean }, null, 2), "utf-8");
+  invalidateCache();
   return clean;
+}
+
+// Security: Verify target path is strictly inside configured workspaces
+async function isPathWithinWorkspaces(targetPath: string, workspaces: string[]): Promise<boolean> {
+  try {
+    const realTarget = await realpath(targetPath);
+    for (const ws of workspaces) {
+      try {
+        const realWs = await realpath(ws);
+        const rel = relative(realWs, realTarget);
+        if (!rel.startsWith("..") && !isAbsolute(rel)) {
+          return true;
+        }
+      } catch {
+        // ignore unresolvable workspace
+      }
+    }
+  } catch {
+    return false;
+  }
+  return false;
 }
 
 async function getProjectStatus(projectDir: string, workspace: string): Promise<ProjectStatus> {
@@ -72,12 +118,26 @@ async function getProjectStatus(projectDir: string, workspace: string): Promise<
     try {
       const serveJsonContent = await readFile(join(tgrepDir, "serve.json"), "utf-8");
       const parsed = JSON.parse(serveJsonContent);
-      if (parsed.pid) {
+      if (parsed.pid && typeof parsed.pid === "number" && parsed.pid > 1) {
         try {
           process.kill(parsed.pid, 0);
-          running = true;
-          pid = parsed.pid;
-          port = parsed.port;
+          // Verify process is actually tgrep to avoid false positives on PID reuse
+          let isTgrep = true;
+          if (process.platform === "linux") {
+            try {
+              const comm = await readFile(`/proc/${parsed.pid}/comm`, "utf-8");
+              isTgrep = comm.trim().includes("tgrep");
+            } catch {
+              isTgrep = false;
+            }
+          }
+          if (isTgrep) {
+            running = true;
+            pid = parsed.pid;
+            port = parsed.port;
+          } else {
+            running = false;
+          }
         } catch {
           running = false;
         }
@@ -147,6 +207,16 @@ async function listAllProjects(): Promise<{ projects: ProjectStatus[]; workspace
   return { projects, workspaces };
 }
 
+async function getCachedProjects(force = false): Promise<{ projects: ProjectStatus[]; workspaces: string[] }> {
+  const now = Date.now();
+  if (!force && cachedData && now - cachedData.timestamp < CACHE_TTL_MS) {
+    return cachedData;
+  }
+  const data = await listAllProjects();
+  cachedData = { ...data, timestamp: now };
+  return cachedData;
+}
+
 async function runManageAction(action: "start" | "stop" | "index", projectPath: string) {
   const workspaces = await getWorkspaces();
   const cmd = isWindows
@@ -166,10 +236,34 @@ async function runManageAction(action: "start" | "stop" | "index", projectPath: 
   const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
 
+  invalidateCache();
+
   return {
     success: exitCode === 0,
     output: (stdout + "\n" + stderr).trim(),
   };
+}
+
+// CSRF & Origin Validation Guard
+function isValidOrigin(req: Request): boolean {
+  if (req.method === "GET") return true;
+
+  const secFetchSite = req.headers.get("sec-fetch-site");
+  if (secFetchSite === "cross-site") {
+    return false;
+  }
+
+  const origin = req.headers.get("origin");
+  const host = req.headers.get("host");
+  if (origin && host) {
+    try {
+      const originHost = new URL(origin).host;
+      if (originHost !== host) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
 const HTML_CONTENT = `<!DOCTYPE html>
@@ -365,7 +459,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
               <span class="is-hidden-mobile">Workspaces</span>
             </button>
             <!-- Refresh Button -->
-            <button onclick="fetchProjects()" class="button is-small is-dark is-rounded" id="refresh-btn" title="Refresh project list">
+            <button onclick="fetchProjects(true)" class="button is-small is-dark is-rounded" id="refresh-btn" title="Refresh project list">
               <span class="icon is-small"><i class="fa-solid fa-rotate" id="refresh-icon"></i></span>
             </button>
           </div>
@@ -501,7 +595,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
           <label class="label has-text-grey is-size-7">Add Workspace Path</label>
           <div class="field has-addons">
             <div class="control is-expanded">
-              <input class="input is-small control-input mono" id="new-workspace-input" type="text" placeholder="/path/to/my/projects or ~/other-repo">
+              <input class="input is-small control-input mono" id="new-workspace-input" type="text" placeholder="/path/to/my/projects">
             </div>
             <div class="control">
               <button class="button is-small is-info" onclick="addWorkspacePath()">
@@ -544,6 +638,17 @@ const HTML_CONTENT = `<!DOCTYPE html>
 
     document.getElementById('pagesize-select').value = pageSize;
     updateViewButtons();
+
+    // Security: Entity encode all dynamic user content to prevent XSS
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
 
     function setViewMode(mode) {
       viewMode = mode;
@@ -593,12 +698,12 @@ const HTML_CONTENT = `<!DOCTYPE html>
       toast.classList.remove('show');
     }
 
-    async function fetchProjects() {
+    async function fetchProjects(force = false) {
       const icon = document.getElementById('refresh-icon');
       if (icon) icon.classList.add('fa-spin');
 
       try {
-        const res = await fetch('/api/projects');
+        const res = await fetch('/api/projects' + (force ? '?refresh=1' : ''));
         const data = await res.json();
         allProjects = data.projects || [];
         allWorkspaces = data.workspaces || [];
@@ -678,7 +783,6 @@ const HTML_CONTENT = `<!DOCTYPE html>
     }
 
     function renderCurrentState() {
-      // Update top stat cards
       document.getElementById('stat-workspaces').innerText = allWorkspaces.length;
       document.getElementById('stat-total').innerText = allProjects.length;
       document.getElementById('stat-running').innerText = allProjects.filter(p => p.running).length;
@@ -726,7 +830,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
           <div class="group-header is-flex is-justify-content-between is-align-items-center">
             <span class="icon-text">
               <span class="icon"><i class="fa-solid \${icon}"></i></span>
-              <strong class="has-text-light mono is-size-6">\${groupName}</strong>
+              <strong class="has-text-light mono is-size-6">\${escapeHtml(groupName)}</strong>
             </span>
             <span class="tag is-dark is-rounded">\${groupItems.length} repos</span>
           </div>
@@ -741,7 +845,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
       projects.forEach(p => {
         const statusBadge = p.running
           ? \`<span class="tag is-serving is-rounded">
-               <span class="pulse-dot"></span> Serving :\${p.port} (PID \${p.pid})
+               <span class="pulse-dot"></span> Serving :\${escapeHtml(p.port)} (PID \${escapeHtml(p.pid)})
              </span>\`
           : p.indexed
           ? \`<span class="tag is-idle is-rounded">
@@ -755,21 +859,23 @@ const HTML_CONTENT = `<!DOCTYPE html>
           ? \`<div class="tags has-addons are-small mt-2 mb-0">
                <span class="tag is-dark mono"><i class="fa-regular fa-file-code mr-1"></i> \${p.files ? Number(p.files).toLocaleString() : '0'} files</span>
                <span class="tag is-dark mono"><i class="fa-solid fa-hashtag mr-1"></i> \${p.trigrams ? (p.trigrams >= 1000 ? (p.trigrams/1000).toFixed(1) + 'k' : p.trigrams) : '0'} trigrams</span>
-               \${p.updated ? \`<span class="tag is-dark is-hidden-mobile"><i class="fa-regular fa-clock mr-1"></i> \${p.updated}</span>\` : ''}
+               \${p.updated ? \`<span class="tag is-dark is-hidden-mobile"><i class="fa-regular fa-clock mr-1"></i> \${escapeHtml(p.updated)}</span>\` : ''}
              </div>\`
           : \`<p class="is-size-7 has-text-grey mt-1">No trigram index created yet</p>\`;
 
+        const safePath = encodeURIComponent(p.path);
+
         const startBtn = p.running
-          ? \`<button onclick="triggerAction('stop', '\${escapeStr(p.path)}')" class="button is-small is-danger is-outlined is-rounded">
+          ? \`<button data-action="stop" data-path="\${safePath}" class="button is-small is-danger is-outlined is-rounded">
                <span class="icon is-small"><i class="fa-solid fa-stop"></i></span>
                <span>Stop</span>
              </button>\`
-          : \`<button onclick="triggerAction('start', '\${escapeStr(p.path)}')" class="button is-small is-success is-outlined is-rounded">
+          : \`<button data-action="start" data-path="\${safePath}" class="button is-small is-success is-outlined is-rounded">
                <span class="icon is-small"><i class="fa-solid fa-play"></i></span>
                <span>Start</span>
              </button>\`;
 
-        const indexBtn = \`<button onclick="triggerAction('index', '\${escapeStr(p.path)}')" class="button is-small is-dark is-rounded mr-2" title="Rebuild trigram index">
+        const indexBtn = \`<button data-action="index" data-path="\${safePath}" class="button is-small is-dark is-rounded mr-2" title="Rebuild trigram index">
                <span class="icon is-small has-text-info"><i class="fa-solid fa-rotate"></i></span>
                <span>\${p.indexed ? 'Re-Index' : 'Index'}</span>
              </button>\`;
@@ -780,8 +886,8 @@ const HTML_CONTENT = `<!DOCTYPE html>
               <div class="level-left">
                 <div>
                   <div class="is-flex is-align-items-center is-flex-wrap-wrap" style="gap: 0.5rem;">
-                    <span class="has-text-weight-bold has-text-white mono is-size-5">\${p.name}</span>
-                    <span class="tag is-dark is-rounded is-size-7 mono" title="\${p.path}"><i class="fa-regular fa-folder mr-1 has-text-grey"></i>\${p.workspaceName}</span>
+                    <span class="has-text-weight-bold has-text-white mono is-size-5">\${escapeHtml(p.name)}</span>
+                    <span class="tag is-dark is-rounded is-size-7 mono" title="\${escapeHtml(p.path)}"><i class="fa-regular fa-folder mr-1 has-text-grey"></i>\${escapeHtml(p.workspaceName)}</span>
                     \${statusBadge}
                   </div>
                   \${details}
@@ -826,27 +932,28 @@ const HTML_CONTENT = `<!DOCTYPE html>
           ? \`<span class="tag is-idle is-rounded is-small"><i class="fa-solid fa-check mr-1"></i> Idle</span>\`
           : \`<span class="tag is-unindexed is-rounded is-small">Unindexed</span>\`;
 
-        const portPid = p.running ? \`:\${p.port} (\${p.pid})\` : '-';
+        const portPid = p.running ? \`:\${escapeHtml(p.port)} (\${escapeHtml(p.pid)})\` : '-';
         const files = p.files ? Number(p.files).toLocaleString() : '-';
         const trigrams = p.trigrams ? (p.trigrams >= 1000 ? (p.trigrams/1000).toFixed(1) + 'k' : p.trigrams) : '-';
+        const safePath = encodeURIComponent(p.path);
 
         const startBtn = p.running
-          ? \`<button onclick="triggerAction('stop', '\${escapeStr(p.path)}')" class="button is-small is-danger is-outlined is-rounded" title="Stop daemon">
+          ? \`<button data-action="stop" data-path="\${safePath}" class="button is-small is-danger is-outlined is-rounded" title="Stop daemon">
                <span class="icon is-small"><i class="fa-solid fa-stop"></i></span>
              </button>\`
-          : \`<button onclick="triggerAction('start', '\${escapeStr(p.path)}')" class="button is-small is-success is-outlined is-rounded" title="Start daemon">
+          : \`<button data-action="start" data-path="\${safePath}" class="button is-small is-success is-outlined is-rounded" title="Start daemon">
                <span class="icon is-small"><i class="fa-solid fa-play"></i></span>
              </button>\`;
 
-        const indexBtn = \`<button onclick="triggerAction('index', '\${escapeStr(p.path)}')" class="button is-small is-dark is-rounded mr-1" title="Rebuild Index">
+        const indexBtn = \`<button data-action="index" data-path="\${safePath}" class="button is-small is-dark is-rounded mr-1" title="Rebuild Index">
                <span class="icon is-small has-text-info"><i class="fa-solid fa-rotate"></i></span>
              </button>\`;
 
         html += \`
           <tr>
             <td>\${statusBadge}</td>
-            <td class="mono has-text-weight-semibold has-text-white">\${p.name}</td>
-            <td class="mono is-size-7 has-text-grey" title="\${p.path}">\${p.workspaceName}</td>
+            <td class="mono has-text-weight-semibold has-text-white">\${escapeHtml(p.name)}</td>
+            <td class="mono is-size-7 has-text-grey" title="\${escapeHtml(p.path)}">\${escapeHtml(p.workspaceName)}</td>
             <td class="mono is-size-7">\${portPid}</td>
             <td class="mono is-size-7">\${files}</td>
             <td class="mono is-size-7">\${trigrams}</td>
@@ -901,25 +1008,36 @@ const HTML_CONTENT = `<!DOCTYPE html>
       pagesContainer.innerHTML = pagesHtml;
     }
 
-    function escapeStr(str) {
-      return str.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'");
-    }
+    // Event delegation: intercepts data-action buttons safely without inline quotation injection
+    document.getElementById('projects-container').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-action]');
+      if (btn) {
+        const action = btn.getAttribute('data-action');
+        const encodedPath = btn.getAttribute('data-path');
+        if (action && encodedPath) {
+          triggerAction(action, decodeURIComponent(encodedPath));
+        }
+      }
+    });
 
     async function triggerAction(action, projectPath) {
       showToast(\`Executing \${action}...\`, 'info');
       try {
         const res = await fetch('/api/action', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest'
+          },
           body: JSON.stringify({ action, path: projectPath })
         });
         const result = await res.json();
         if (result.success) {
           showToast(\`Action '\${action}' succeeded!\`, 'success');
         } else {
-          showToast(\`Failed: \${result.output || 'Unknown error'}\`, 'error');
+          showToast(\`Failed: \${result.output || 'Action rejected'}\`, 'error');
         }
-        await fetchProjects();
+        await fetchProjects(true);
       } catch (err) {
         showToast(\`Action failed: \${err.message}\`, 'error');
       }
@@ -942,7 +1060,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
         html += \`
           <div class="field has-addons mb-2">
             <div class="control is-expanded">
-              <input class="input is-small control-input mono" type="text" value="\${ws}" readonly>
+              <input class="input is-small control-input mono" type="text" value="\${escapeHtml(ws)}" readonly>
             </div>
             <div class="control">
               <button class="button is-small is-danger is-outlined" onclick="removeWorkspace(\${index})" \${tempWorkspaces.length <= 1 ? 'disabled title="At least one workspace required"' : ''}>
@@ -980,7 +1098,10 @@ const HTML_CONTENT = `<!DOCTYPE html>
       try {
         const res = await fetch('/api/config', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest'
+          },
           body: JSON.stringify({ workspaces: tempWorkspaces })
         });
         const result = await res.json();
@@ -988,9 +1109,9 @@ const HTML_CONTENT = `<!DOCTYPE html>
           showToast('Workspace paths saved successfully!', 'success');
           allWorkspaces = result.workspaces;
           closeSettings();
-          await fetchProjects();
+          await fetchProjects(true);
         } else {
-          showToast('Failed to save config: ' + result.output, 'error');
+          showToast(\`Failed: \${result.output || 'Validation failed'}\`, 'error');
         }
       } catch (err) {
         showToast('Error saving settings: ' + err.message, 'error');
@@ -1007,17 +1128,27 @@ const HTML_CONTENT = `<!DOCTYPE html>
 
 Bun.serve({
   port: PORT,
+  hostname: HOST,
   async fetch(req) {
     const url = new URL(req.url);
 
+    // CSRF Guard for state-changing requests
+    if (!isValidOrigin(req)) {
+      return Response.json({ success: false, output: "Cross-site request rejected" }, { status: 403 });
+    }
+
     if (url.pathname === "/") {
       return new Response(HTML_CONTENT, {
-        headers: { "Content-Type": "text/html; charset=utf-8" },
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Content-Security-Policy": "default-src 'self'; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; font-src https://cdnjs.cloudflare.com; img-src 'self' data:; connect-src 'self'",
+        },
       });
     }
 
     if (url.pathname === "/api/projects" && req.method === "GET") {
-      const data = await listAllProjects();
+      const force = url.searchParams.get("refresh") === "1";
+      const data = await getCachedProjects(force);
       return Response.json(data);
     }
 
@@ -1028,6 +1159,9 @@ Bun.serve({
 
     if (url.pathname === "/api/config" && req.method === "POST") {
       try {
+        if (!req.headers.get("content-type")?.includes("application/json")) {
+          return Response.json({ success: false, output: "Content-Type must be application/json" }, { status: 415 });
+        }
         const body = await req.json();
         const workspaces = body.workspaces;
         if (!Array.isArray(workspaces)) {
@@ -1041,7 +1175,7 @@ Bun.serve({
     }
 
     if (url.pathname === "/api/widget" && req.method === "GET") {
-      const data = await listAllProjects();
+      const data = await getCachedProjects(false);
       const running = data.projects.filter((p) => p.running).length;
       const indexed = data.projects.filter((p) => p.indexed).length;
       return Response.json({
@@ -1054,15 +1188,19 @@ Bun.serve({
 
     if (url.pathname === "/api/action" && req.method === "POST") {
       try {
+        if (!req.headers.get("content-type")?.includes("application/json")) {
+          return Response.json({ success: false, output: "Content-Type must be application/json" }, { status: 415 });
+        }
         const body = await req.json();
         const { action, path, project } = body;
         if (!["start", "stop", "index"].includes(action)) {
           return Response.json({ success: false, output: "Invalid action" }, { status: 400 });
         }
 
+        const workspaces = await getWorkspaces();
         let targetPath = path;
+
         if (!targetPath && project) {
-          const workspaces = await getWorkspaces();
           for (const ws of workspaces) {
             const p = join(ws, project);
             try {
@@ -1081,6 +1219,15 @@ Bun.serve({
           return Response.json({ success: false, output: "Project target path not found" }, { status: 404 });
         }
 
+        // Security: Restrict target path to approved workspaces
+        const isAllowed = await isPathWithinWorkspaces(targetPath, workspaces);
+        if (!isAllowed) {
+          return Response.json(
+            { success: false, output: "Forbidden: Target directory is outside configured workspaces" },
+            { status: 403 }
+          );
+        }
+
         const result = await runManageAction(action, targetPath);
         return Response.json(result);
       } catch (err: any) {
@@ -1092,4 +1239,4 @@ Bun.serve({
   },
 });
 
-console.log(`Codebase Index Manager running at http://0.0.0.0:${PORT}`);
+console.log(`Codebase Index Manager running at http://${HOST}:${PORT}`);
